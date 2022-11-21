@@ -118,6 +118,15 @@ def setup_cors(app):
 def create_api(app):
     from modules.api.api import Api
     api = Api(app, queue_lock)
+    origins = ["*"]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        )
+
     return api
 
 
@@ -138,6 +147,7 @@ def api_only():
     app = FastAPI()
     setup_cors(app)
     app.add_middleware(GZipMiddleware, minimum_size=1000)
+
     api = create_api(app)
 
     modules.script_callbacks.app_started_callback(None, app)
