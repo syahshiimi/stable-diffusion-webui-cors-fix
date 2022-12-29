@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
+from modules import import_hook
 from modules.call_queue import wrap_queued_call, queue_lock, wrap_gradio_gpu_call
 from modules.paths import script_path
 
@@ -53,9 +54,10 @@ def initialize():
     codeformer.setup_model(cmd_opts.codeformer_models_path)
     gfpgan.setup_model(cmd_opts.gfpgan_models_path)
     shared.face_restorers.append(modules.face_restoration.FaceRestoration())
-    modelloader.load_upscalers()
 
     modules.scripts.load_scripts()
+
+    modelloader.load_upscalers()
 
     modules.sd_vae.refresh_vae_list()
     modules.sd_models.load_model()
@@ -146,7 +148,7 @@ def webui():
 
         shared.demo = modules.ui.create_ui()
 
-        app, local_url, share_url = shared.demo.launch(
+        app, local_url, share_url = shared.demo.queue(default_enabled=False).launch(
             share=cmd_opts.share,
             server_name=server_name,
             server_port=cmd_opts.port,
@@ -162,8 +164,8 @@ def webui():
 
         # gradio uses a very open CORS policy via app.user_middleware, which makes it possible for
         # an attacker to trick the user into opening a malicious HTML page, which makes a request to the
-        # running web ui and do whatever the attcker wants, including installing an extension and
-        # runnnig its code. We disable this here. Suggested by RyotaK.
+        # running web ui and do whatever the attacker wants, including installing an extension and
+        # running its code. We disable this here. Suggested by RyotaK.
         app.user_middleware = [x for x in app.user_middleware if x.cls.__name__ != 'CORSMiddleware']
 
         setup_cors(app)
@@ -187,6 +189,8 @@ def webui():
 
         print('Reloading custom scripts')
         modules.scripts.reload_scripts()
+        modelloader.load_upscalers()
+
         print('Reloading modules: modules.ui')
         importlib.reload(modules.ui)
         print('Refreshing Model List')

@@ -136,8 +136,19 @@ def draw_grid_annotations(im, width, height, hor_texts, ver_texts):
                 lines.append(word)
         return lines
 
-    def draw_texts(drawing, draw_x, draw_y, lines):
+    def get_font(fontsize):
+        try:
+            return ImageFont.truetype(opts.font or Roboto, fontsize)
+        except Exception:
+            return ImageFont.truetype(Roboto, fontsize)
+
+    def draw_texts(drawing, draw_x, draw_y, lines, initial_fnt, initial_fontsize):
         for i, line in enumerate(lines):
+            fnt = initial_fnt
+            fontsize = initial_fontsize
+            while drawing.multiline_textsize(line.text, font=fnt)[0] > line.allowed_width and fontsize > 0:
+                fontsize -= 1
+                fnt = get_font(fontsize)
             drawing.multiline_text((draw_x, draw_y + line.size[1] / 2), line.text, font=fnt, fill=color_active if line.is_active else color_inactive, anchor="mm", align="center")
 
             if not line.is_active:
@@ -148,10 +159,7 @@ def draw_grid_annotations(im, width, height, hor_texts, ver_texts):
     fontsize = (width + height) // 25
     line_spacing = fontsize // 2
 
-    try:
-        fnt = ImageFont.truetype(opts.font or Roboto, fontsize)
-    except Exception:
-        fnt = ImageFont.truetype(Roboto, fontsize)
+    fnt = get_font(fontsize)
 
     color_active = (0, 0, 0)
     color_inactive = (153, 153, 153)
@@ -178,6 +186,7 @@ def draw_grid_annotations(im, width, height, hor_texts, ver_texts):
         for line in texts:
             bbox = calc_d.multiline_textbbox((0, 0), line.text, font=fnt)
             line.size = (bbox[2] - bbox[0], bbox[3] - bbox[1])
+            line.allowed_width = allowed_width
 
     hor_text_heights = [sum([line.size[1] + line_spacing for line in lines]) - line_spacing for lines in hor_texts]
     ver_text_heights = [sum([line.size[1] + line_spacing for line in lines]) - line_spacing * len(lines) for lines in
@@ -194,13 +203,13 @@ def draw_grid_annotations(im, width, height, hor_texts, ver_texts):
         x = pad_left + width * col + width / 2
         y = pad_top / 2 - hor_text_heights[col] / 2
 
-        draw_texts(d, x, y, hor_texts[col])
+        draw_texts(d, x, y, hor_texts[col], fnt, fontsize)
 
     for row in range(rows):
         x = pad_left / 2
         y = pad_top + height * row + height / 2 - ver_text_heights[row] / 2
 
-        draw_texts(d, x, y, ver_texts[row])
+        draw_texts(d, x, y, ver_texts[row], fnt, fontsize)
 
     return result
 
@@ -429,7 +438,7 @@ def save_image(image, path, basename, seed=None, prompt=None, extension='png', i
             The directory to save the image. Note, the option `save_to_dirs` will make the image to be saved into a sub directory.
         basename (`str`):
             The base filename which will be applied to `filename pattern`.
-        seed, prompt, short_filename, 
+        seed, prompt, short_filename,
         extension (`str`):
             Image file extension, default is `png`.
         pngsectionname (`str`):
@@ -501,30 +510,39 @@ def save_image(image, path, basename, seed=None, prompt=None, extension='png', i
     image = params.image
     fullfn = params.filename
     info = params.pnginfo.get(pnginfo_section_name, None)
+
+    def _atomically_save_image(image_to_save, filename_without_extension, extension):
+        # save image with .tmp extension to avoid race condition when another process detects new image in the directory
+        temp_file_path = filename_without_extension + ".tmp"
+        image_format = Image.registered_extensions()[extension]
+
+        if extension.lower() == '.png':
+            pnginfo_data = PngImagePlugin.PngInfo()
+            if opts.enable_pnginfo:
+                for k, v in params.pnginfo.items():
+                    pnginfo_data.add_text(k, str(v))
+
+            image_to_save.save(temp_file_path, format=image_format, quality=opts.jpeg_quality, pnginfo=pnginfo_data)
+
+        elif extension.lower() in (".jpg", ".jpeg", ".webp"):
+            image_to_save.save(temp_file_path, format=image_format, quality=opts.jpeg_quality)
+
+            if opts.enable_pnginfo and info is not None:
+                exif_bytes = piexif.dump({
+                    "Exif": {
+                        piexif.ExifIFD.UserComment: piexif.helper.UserComment.dump(info or "", encoding="unicode")
+                    },
+                })
+
+                piexif.insert(exif_bytes, temp_file_path)
+        else:
+            image_to_save.save(temp_file_path, format=image_format, quality=opts.jpeg_quality)
+
+        # atomically rename the file with correct extension
+        os.replace(temp_file_path, filename_without_extension + extension)
+
     fullfn_without_extension, extension = os.path.splitext(params.filename)
-
-    def exif_bytes():
-        return piexif.dump({
-            "Exif": {
-                piexif.ExifIFD.UserComment: piexif.helper.UserComment.dump(info or "", encoding="unicode")
-            },
-        })
-
-    if extension.lower() == '.png':
-        pnginfo_data = PngImagePlugin.PngInfo()
-        if opts.enable_pnginfo:
-            for k, v in params.pnginfo.items():
-                pnginfo_data.add_text(k, str(v))
-
-        image.save(fullfn, quality=opts.jpeg_quality, pnginfo=pnginfo_data)
-
-    elif extension.lower() in (".jpg", ".jpeg", ".webp"):
-        image.save(fullfn, quality=opts.jpeg_quality)
-
-        if opts.enable_pnginfo and info is not None:
-            piexif.insert(exif_bytes(), fullfn)
-    else:
-        image.save(fullfn, quality=opts.jpeg_quality)
+    _atomically_save_image(image, fullfn_without_extension, extension)
 
     image.already_saved_as = fullfn
 
@@ -538,9 +556,7 @@ def save_image(image, path, basename, seed=None, prompt=None, extension='png', i
         elif oversize:
             image = image.resize((image.width * target_side_length // image.height, target_side_length), LANCZOS)
 
-        image.save(fullfn_without_extension + ".jpg", quality=opts.jpeg_quality)
-        if opts.enable_pnginfo and info is not None:
-            piexif.insert(exif_bytes(), fullfn_without_extension + ".jpg")
+        _atomically_save_image(image, fullfn_without_extension, ".jpg")
 
     if opts.save_txt and info is not None:
         txt_fullfn = f"{fullfn_without_extension}.txt"
@@ -583,7 +599,7 @@ def read_info_from_image(image):
 Negative prompt: {json_info["uc"]}
 Steps: {json_info["steps"]}, Sampler: {sampler}, CFG scale: {json_info["scale"]}, Seed: {json_info["seed"]}, Size: {image.width}x{image.height}, Clip skip: 2, ENSD: 31337"""
         except Exception:
-            print(f"Error parsing NovelAI iamge generation parameters:", file=sys.stderr)
+            print("Error parsing NovelAI image generation parameters:", file=sys.stderr)
             print(traceback.format_exc(), file=sys.stderr)
 
     return geninfo, items
@@ -606,3 +622,14 @@ def image_data(data):
         pass
 
     return '', None
+
+
+def flatten(img, bgcolor):
+    """replaces transparency with bgcolor (example: "#ffffff"), returning an RGB mode image with no transparency"""
+
+    if img.mode == "RGBA":
+        background = Image.new('RGBA', img.size, bgcolor)
+        background.paste(img, mask=img)
+        img = background
+
+    return img.convert('RGB')
